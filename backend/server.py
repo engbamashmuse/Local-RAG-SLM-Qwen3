@@ -11,6 +11,8 @@ import uuid
 from datetime import datetime, timezone
 import hashlib
 import shutil
+import zipfile
+import tempfile
 
 # RAG imports
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader
@@ -36,20 +38,30 @@ UPLOADS_DIR.mkdir(exist_ok=True)
 CHROMA_DIR.mkdir(exist_ok=True)
 
 # Initialize Ollama embeddings and LLM
-embeddings = OllamaEmbeddings(model="nomic-embed-text", base_url="http://localhost:11434")
-llm = ChatOllama(
-    model="qwen2.5:3b",
-    base_url="http://localhost:11434",
-    temperature=0.1,
-    num_ctx=8192
-)
+try:
+    embeddings = OllamaEmbeddings(model="nomic-embed-text", base_url="http://localhost:11434")
+    llm = ChatOllama(
+        model="qwen2.5:3b",
+        base_url="http://localhost:11434",
+        temperature=0.1,
+        num_ctx=8192
+    )
+except Exception as e:
+    logging.warning(f"Ollama not available: {e}. Make sure Ollama is running with required models.")
+    embeddings = None
+    llm = None
 
 # Initialize ChromaDB
-vectorstore = Chroma(
-    persist_directory=str(CHROMA_DIR),
-    embedding_function=embeddings,
-    collection_name="documents"
-)
+vectorstore = None
+if embeddings:
+    try:
+        vectorstore = Chroma(
+            persist_directory=str(CHROMA_DIR),
+            embedding_function=embeddings,
+            collection_name="documents"
+        )
+    except Exception as e:
+        logging.warning(f"ChromaDB initialization failed: {e}")
 
 # Create the main app without a prefix
 app = FastAPI()
@@ -94,6 +106,13 @@ class ChatHistory(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+class UploadResponse(BaseModel):
+    message: str
+    total_files: int
+    successful: int
+    failed: int
+    details: List[dict]
+
 # Helper functions
 def calculate_file_hash(file_path: Path) -> str:
     """Calculate SHA256 hash of a file"""
@@ -113,7 +132,7 @@ def load_and_split_document(file_path: Path, collection: str) -> List:
     elif file_extension == ".docx":
         loader = Docx2txtLoader(str(file_path))
     elif file_extension == ".txt":
-        loader = TextLoader(str(file_path))
+        loader = TextLoader(str(file_path), encoding='utf-8')
     else:
         raise ValueError(f"Unsupported file type: {file_extension}")
     
@@ -132,6 +151,79 @@ def load_and_split_document(file_path: Path, collection: str) -> List:
         chunk.metadata["filename"] = file_path.name
     
     return chunks
+
+async def process_single_file(file_path: Path, filename: str, collection: str) -> dict:
+    """Process a single file and return result"""
+    try:
+        # Calculate file hash
+        file_hash = calculate_file_hash(file_path)
+        
+        # Check if document already exists
+        existing_doc = await db.documents.find_one({"file_hash": file_hash})
+        if existing_doc:
+            return {
+                "filename": filename,
+                "status": "skipped",
+                "reason": "Already exists"
+            }
+        
+        # Load and index document
+        chunks = load_and_split_document(file_path, collection)
+        
+        # Generate unique ID
+        file_id = str(uuid.uuid4())
+        
+        # Add to vector store with metadata filtering
+        if vectorstore:
+            vectorstore.add_documents(
+                chunks,
+                ids=[f"{file_id}_{i}" for i in range(len(chunks))]
+            )
+        
+        # Save metadata to MongoDB
+        doc_metadata = DocumentMetadata(
+            id=file_id,
+            filename=filename,
+            file_hash=file_hash,
+            collection=collection,
+            file_size=file_path.stat().st_size,
+            file_path=str(file_path),
+            status="indexed"
+        )
+        
+        doc_dict = doc_metadata.model_dump()
+        doc_dict['upload_date'] = doc_dict['upload_date'].isoformat()
+        await db.documents.insert_one(doc_dict)
+        
+        return {
+            "filename": filename,
+            "status": "success",
+            "chunks": len(chunks),
+            "document_id": file_id
+        }
+    
+    except Exception as e:
+        logging.error(f"Error processing {filename}: {str(e)}")
+        return {
+            "filename": filename,
+            "status": "failed",
+            "reason": str(e)
+        }
+
+def extract_files_from_folder(zip_path: Path, extract_to: Path) -> List[Path]:
+    """Extract files from ZIP folder and return list of valid document paths"""
+    allowed_extensions = [".pdf", ".docx", ".txt"]
+    extracted_files = []
+    
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall(extract_to)
+    
+    # Recursively find all valid documents
+    for file_path in extract_to.rglob('*'):
+        if file_path.is_file() and file_path.suffix.lower() in allowed_extensions:
+            extracted_files.append(file_path)
+    
+    return extracted_files
 
 # Session memory store (in production, use Redis)
 session_memories = {}
@@ -153,77 +245,109 @@ def get_or_create_memory(session_id: str):
 async def root():
     return {"message": "RAG-SLM API", "status": "running"}
 
-@api_router.post("/documents/upload")
-async def upload_document(
-    file: UploadFile = File(...),
+@api_router.post("/documents/upload", response_model=UploadResponse)
+async def upload_documents(
+    files: List[UploadFile] = File(...),
     collection: str = Form("default")
 ):
-    """Upload and index a document"""
+    """Upload and index multiple documents or a folder (ZIP)"""
+    if not vectorstore or not llm:
+        raise HTTPException(
+            status_code=503,
+            detail="Ollama is not running. Please start Ollama with: ollama serve"
+        )
+    
+    results = []
+    successful = 0
+    failed = 0
+    temp_dir = None
+    
     try:
-        # Validate file type
-        allowed_extensions = [".pdf", ".docx", ".txt"]
-        file_extension = Path(file.filename).suffix.lower()
-        if file_extension not in allowed_extensions:
-            raise HTTPException(
-                status_code=400,
-                detail=f"File type not supported. Allowed: {', '.join(allowed_extensions)}"
-            )
+        for file in files:
+            file_extension = Path(file.filename).suffix.lower()
+            
+            # Handle ZIP files (folders)
+            if file_extension == ".zip":
+                temp_dir = Path(tempfile.mkdtemp())
+                zip_path = temp_dir / file.filename
+                
+                # Save ZIP file
+                with open(zip_path, "wb") as buffer:
+                    shutil.copyfileobj(file.file, buffer)
+                
+                # Extract files
+                try:
+                    extracted_files = extract_files_from_folder(zip_path, temp_dir)
+                    
+                    for extracted_file in extracted_files:
+                        result = await process_single_file(
+                            extracted_file,
+                            extracted_file.name,
+                            collection
+                        )
+                        results.append(result)
+                        if result["status"] == "success":
+                            successful += 1
+                        elif result["status"] == "failed":
+                            failed += 1
+                    
+                    # Clean up temp directory
+                    shutil.rmtree(temp_dir)
+                    temp_dir = None
+                    
+                except Exception as e:
+                    results.append({
+                        "filename": file.filename,
+                        "status": "failed",
+                        "reason": f"ZIP extraction failed: {str(e)}"
+                    })
+                    failed += 1
+            
+            # Handle individual files
+            else:
+                # Validate file type
+                allowed_extensions = [".pdf", ".docx", ".txt"]
+                if file_extension not in allowed_extensions:
+                    results.append({
+                        "filename": file.filename,
+                        "status": "failed",
+                        "reason": f"Unsupported file type. Allowed: {', '.join(allowed_extensions)}"
+                    })
+                    failed += 1
+                    continue
+                
+                # Save file
+                file_id = str(uuid.uuid4())
+                file_path = UPLOADS_DIR / f"{file_id}_{file.filename}"
+                
+                with open(file_path, "wb") as buffer:
+                    shutil.copyfileobj(file.file, buffer)
+                
+                # Process file
+                result = await process_single_file(file_path, file.filename, collection)
+                results.append(result)
+                
+                if result["status"] == "success":
+                    successful += 1
+                elif result["status"] == "failed":
+                    failed += 1
+                    # Clean up failed file
+                    if file_path.exists():
+                        file_path.unlink()
         
-        # Save file
-        file_id = str(uuid.uuid4())
-        file_path = UPLOADS_DIR / f"{file_id}_{file.filename}"
-        
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        
-        # Calculate file hash
-        file_hash = calculate_file_hash(file_path)
-        
-        # Check if document already exists
-        existing_doc = await db.documents.find_one({"file_hash": file_hash})
-        if existing_doc:
-            # Remove uploaded file
-            file_path.unlink()
-            raise HTTPException(
-                status_code=400,
-                detail="Document already exists in the system"
-            )
-        
-        # Load and index document
-        chunks = load_and_split_document(file_path, collection)
-        
-        # Add to vector store with metadata filtering
-        vectorstore.add_documents(
-            chunks,
-            ids=[f"{file_id}_{i}" for i in range(len(chunks))]
+        return UploadResponse(
+            message=f"Processed {len(files)} file(s)",
+            total_files=len(results),
+            successful=successful,
+            failed=failed,
+            details=results
         )
-        
-        # Save metadata to MongoDB
-        doc_metadata = DocumentMetadata(
-            id=file_id,
-            filename=file.filename,
-            file_hash=file_hash,
-            collection=collection,
-            file_size=file_path.stat().st_size,
-            file_path=str(file_path),
-            status="indexed"
-        )
-        
-        doc_dict = doc_metadata.model_dump()
-        doc_dict['upload_date'] = doc_dict['upload_date'].isoformat()
-        await db.documents.insert_one(doc_dict)
-        
-        return {
-            "message": "Document uploaded and indexed successfully",
-            "document_id": file_id,
-            "filename": file.filename,
-            "chunks": len(chunks)
-        }
     
     except Exception as e:
-        logging.error(f"Error uploading document: {str(e)}")
-        if file_path.exists():
-            file_path.unlink()
+        logging.error(f"Error uploading documents: {str(e)}")
+        # Clean up temp directory if exists
+        if temp_dir and temp_dir.exists():
+            shutil.rmtree(temp_dir)
         raise HTTPException(status_code=500, detail=str(e))
 
 @api_router.get("/documents")
@@ -262,9 +386,11 @@ async def delete_document(document_id: str):
             file_path.unlink()
         
         # Delete from vector store
-        # Note: ChromaDB doesn't have a direct way to delete by metadata,
-        # so we need to track IDs when we add documents
-        vectorstore.delete(ids=[f"{document_id}_{i}" for i in range(1000)])  # Delete up to 1000 chunks
+        if vectorstore:
+            try:
+                vectorstore.delete(ids=[f"{document_id}_{i}" for i in range(1000)])  # Delete up to 1000 chunks
+            except Exception as e:
+                logging.warning(f"Error deleting from vectorstore: {e}")
         
         # Delete from MongoDB
         await db.documents.delete_one({"id": document_id})
@@ -289,6 +415,12 @@ async def get_collections():
 @api_router.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     """Chat with documents using RAG"""
+    if not vectorstore or not llm:
+        raise HTTPException(
+            status_code=503,
+            detail="Ollama is not running. Please start Ollama and pull required models: qwen2.5:3b, nomic-embed-text"
+        )
+    
     try:
         # Generate session ID if not provided
         session_id = request.session_id or str(uuid.uuid4())
@@ -426,18 +558,24 @@ async def health_check():
     """Health check endpoint"""
     try:
         # Check Ollama connectivity
-        test_response = llm.invoke("test")
+        if llm:
+            test_response = llm.invoke("test")
+            ollama_status = "connected"
+        else:
+            ollama_status = "disconnected"
         
         return {
-            "status": "healthy",
-            "ollama": "connected",
+            "status": "healthy" if ollama_status == "connected" else "degraded",
+            "ollama": ollama_status,
             "mongodb": "connected",
-            "vectorstore": "ready"
+            "vectorstore": "ready" if vectorstore else "not initialized"
         }
     except Exception as e:
         return {
             "status": "unhealthy",
-            "error": str(e)
+            "error": str(e),
+            "ollama": "disconnected",
+            "note": "Please run: ollama serve && ollama pull qwen2.5:3b && ollama pull nomic-embed-text"
         }
 
 # Include the router in the main app
