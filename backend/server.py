@@ -518,7 +518,7 @@ async def chat(request: ChatRequest):
             await db.chat_history.insert_one(history_dict)
         
         return ChatResponse(
-            answer=result["answer"],
+            answer=answer,
             sources=sources,
             session_id=session_id
         )
