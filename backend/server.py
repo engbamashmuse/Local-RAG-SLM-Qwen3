@@ -478,7 +478,7 @@ async def chat(request: ChatRequest):
         
         new_messages = [
             ChatMessage(role="user", content=request.query),
-            ChatMessage(role="assistant", content=result["answer"])
+            ChatMessage(role="assistant", content=answer)
         ]
         
         if chat_history_doc:
