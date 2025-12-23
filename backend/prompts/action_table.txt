@@ -1,0 +1,2 @@
+Extract all action items from the context and present them in a markdown table.
+Columns should be: Action Item, Owner (if mentioned), Due Date (if mentioned), and Priority (High/Medium/Low based on context).

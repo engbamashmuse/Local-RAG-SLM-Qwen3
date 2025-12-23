@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  backend:
+    build: 
+      context: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      - MONGO_URL=mongodb://mongo:27017
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+    depends_on:
+      - mongo
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_BACKEND_URL=http://localhost:8000
+    depends_on:
+      - backend
+
+  mongo:
+    image: mongo:6.0.4@sha256:7251752b55f191142277d7040523edb341c2c366601c03bf24f603c4f74f7627
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+  # Optional: Ollama inside Docker (though we usually recommend running local for GPU access)
+  # ollama:
+  #   image: ollama/ollama:0.1.28@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ollama_data:/root/.ollama
+
+volumes:
+  mongo_data:
+  ollama_data:

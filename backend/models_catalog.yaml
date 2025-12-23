@@ -1,0 +1,32 @@
+low:
+  - name: "phi3:mini"
+    ram_gb: 4
+    description: "Microsoft Phi-3 Mini (3.8B). Best for low-end laptops."
+  - name: "qwen2.5:1.5b"
+    ram_gb: 2
+    description: "Qwen 2.5 1.5B. Extremely fast, good for simple tasks."
+  - name: "tinyllama"
+    ram_gb: 2
+    description: "TinyLlama 1.1B. Very lightweight, lower reasoning capability."
+
+mid:
+  - name: "qwen2.5:3b"
+    ram_gb: 6
+    description: "Qwen 2.5 3B. Balanced performance (Default)."
+  - name: "llama3.2:3b"
+    ram_gb: 6
+    description: "Llama 3.2 3B. Meta's efficient model."
+  - name: "mistral:7b"
+    ram_gb: 8
+    description: "Mistral 7B. Strong reasoning, requires 8GB+ RAM."
+
+high:
+  - name: "qwen2.5:14b"
+    ram_gb: 16
+    description: "Qwen 2.5 14B. Powerful reasoning, requires 16GB VRAM/RAM."
+  - name: "llama3.1:70b"
+    ram_gb: 48
+    description: "Llama 3.1 70B. SOTA open model, requires massive resources."
+  - name: "mixtral:8x7b"
+    ram_gb: 32
+    description: "Mixtral 8x7B MoE. High performance, requires 32GB+ RAM."

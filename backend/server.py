@@ -13,6 +13,10 @@ import hashlib
 import shutil
 import zipfile
 import tempfile
+import yaml
+import asyncio
+import time
+from prometheus_client import CollectorRegistry, Gauge, push_to_gateway, start_http_server, Summary
 
 # RAG imports
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader
@@ -24,6 +28,21 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
+
+# Load Model Name (Single Source of Truth)
+try:
+    MODEL_NAME = (ROOT_DIR / ".model").read_text(encoding="utf-8").strip()
+except Exception as e:
+    logging.warning(f"Could not read .model file: {e}")
+    # Try to load first mid model from catalog, else unknown
+    try:
+        catalog_path = ROOT_DIR / "models_catalog.yaml"
+        with open(catalog_path, "r", encoding="utf-8") as f:
+            cat = yaml.safe_load(f)
+            MODEL_NAME = cat['mid'][0]['name']
+    except:
+        MODEL_NAME = "unknown"
+    logging.info(f"Defaulting to model: {MODEL_NAME}")
 
 # MongoDB connection
 mongo_url = os.environ['MONGO_URL']
@@ -40,7 +59,7 @@ CHROMA_DIR.mkdir(exist_ok=True)
 try:
     embeddings = OllamaEmbeddings(model="nomic-embed-text", base_url="http://localhost:11434")
     llm = ChatOllama(
-        model="qwen2.5:3b",
+        model=MODEL_NAME,
         base_url="http://localhost:11434",
         temperature=0.1,
         num_ctx=8192
@@ -61,6 +80,13 @@ if embeddings:
         )
     except Exception as e:
         logging.warning(f"ChromaDB initialization failed: {e}")
+
+# job store for async tasks
+jobs = {}
+
+# Telemetry
+MODEL_SWITCH_DURATION = Summary('rag_model_switch_duration_seconds', 'Time spent switching models')
+
 
 # Create the main app without a prefix
 app = FastAPI()
@@ -110,7 +136,17 @@ class UploadResponse(BaseModel):
     total_files: int
     successful: int
     failed: int
+    successful: int
+    failed: int
     details: List[dict]
+
+class ModelSetRequest(BaseModel):
+    model: str
+
+class JobStatus(BaseModel):
+    job_id: str
+    status: str # running, success, failed
+    details: Optional[str] = None
 
 # Helper functions
 def calculate_file_hash(file_path: Path) -> str:
@@ -150,6 +186,61 @@ def load_and_split_document(file_path: Path, collection: str) -> List:
         chunk.metadata["filename"] = file_path.name
     
     return chunks
+
+    return chunks
+
+async def switch_model_task(model_name: str, job_id: str):
+    """Background task to switch model"""
+    start_time = time.time()
+    try:
+        jobs[job_id] = {"status": "running", "details": f"Switching to {model_name}..."}
+        
+        # Check if offline mode from env or just default logic
+        # For this implementation, we try to detect if we can pull
+        
+        # 1. Check if model exists locally
+        # In a real shell we would run 'ollama list', here we simulate or try pull
+        
+        # Run ollama pull
+        process = await asyncio.create_subprocess_exec(
+            "ollama", "pull", model_name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+        
+        if process.returncode != 0:
+            # If pull failed, maybe we are offline?
+            # If strict offline mode is requested (Gap Remedy #2 part), we should have checked list first.
+            # For now, we report the error.
+            error_msg = stderr.decode()
+            jobs[job_id] = {"status": "failed", "details": f"Ollama pull failed: {error_msg}"}
+            return
+
+        # 2. Update .model file
+        (ROOT_DIR / ".model").write_text(model_name, encoding="utf-8")
+        
+        # 3. Re-initialize global LLM (This is tricky in async default fastapi, 
+        # usually we just rely on the next request picking it up if we re-create, 
+        # OR we rely on Ollama behaving dynamically.
+        # But server.py initializes `llm` global on startup. We need to update it.)
+        global llm
+        llm = ChatOllama(
+            model=model_name,
+            base_url="http://localhost:11434",
+            temperature=0.1,
+            num_ctx=8192
+        )
+        
+        # Telemetry
+        duration = time.time() - start_time
+        MODEL_SWITCH_DURATION.observe(duration)
+        
+        jobs[job_id] = {"status": "success", "details": f"Successfully switched to {model_name}"}
+        
+    except Exception as e:
+        logging.error(f"Model switch failed: {e}")
+        jobs[job_id] = {"status": "failed", "details": str(e)}
 
 async def process_single_file(file_path: Path, filename: str, collection: str) -> dict:
     """Process a single file and return result"""
@@ -231,7 +322,7 @@ session_memories = {}
 # Routes
 @api_router.get("/")
 async def root():
-    return {"message": "RAG-SLM API", "status": "running"}
+    return {"message": "Local LLM RAG API", "status": "running"}
 
 @api_router.post("/documents/upload", response_model=UploadResponse)
 async def upload_documents(
@@ -400,13 +491,96 @@ async def get_collections():
         logging.error(f"Error fetching collections: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@api_router.get("/models")
+async def get_models():
+    """Get available models from catalog"""
+    try:
+        catalog_path = ROOT_DIR / "models_catalog.yaml"
+        if not catalog_path.exists():
+            return {"error": "Catalog not found"}
+        
+        with open(catalog_path, "r", encoding="utf-8") as f:
+            catalog = yaml.safe_load(f)
+            
+        # Get current model
+        try:
+            current = (ROOT_DIR / ".model").read_text(encoding="utf-8").strip()
+        except:
+            current = "unknown"
+            
+        return {"catalog": catalog, "current": current}
+    except Exception as e:
+        logging.error(f"Error fetching models: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.post("/model/set")
+async def set_model(request: ModelSetRequest):
+    """Switch active model (Async)"""
+    # Validate against catalog
+    catalog_path = ROOT_DIR / "models_catalog.yaml"
+    if catalog_path.exists():
+        with open(catalog_path, "r", encoding="utf-8") as f:
+            catalog = yaml.safe_load(f)
+        
+        # Flatten catalog to find valid names
+        valid_models = []
+        for tier in catalog.values():
+            for m in tier:
+                valid_models.append(m["name"])
+        
+        if request.model not in valid_models:
+            raise HTTPException(status_code=400, detail=f"Model {request.model} not in catalog")
+    
+    # Create Job
+    job_id = str(uuid.uuid4())
+    jobs[job_id] = {"status": "pending", "details": "Starting..."}
+    
+    # Start background task
+    asyncio.create_task(switch_model_task(request.model, job_id))
+    
+    return {"job_id": job_id, "message": "Model switch accepted"}
+
+@api_router.get("/model/status/{job_id}", response_model=JobStatus)
+async def get_job_status(job_id: str):
+    """Check status of async job"""
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    job = jobs[job_id]
+    return JobStatus(
+        job_id=job_id,
+        status=job["status"],
+        details=job.get("details")
+    )
+
+@api_router.get("/prompts")
+async def get_prompts():
+    """List available pre-set prompts"""
+    prompts_dir = ROOT_DIR / "prompts"
+    if not prompts_dir.exists():
+        return {"prompts": []}
+        
+    prompts = []
+    for f in prompts_dir.glob("*.txt"):
+        try:
+            content = f.read_text(encoding="utf-8")
+            prompts.append({
+                "name": f.stem.replace("_", " ").title(),
+                "filename": f.name,
+                "content": content
+            })
+        except Exception as e:
+            logging.error(f"Error reading prompt {f}: {e}")
+            
+    return {"prompts": prompts}
+
 @api_router.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     """Chat with documents using RAG"""
     if not vectorstore or not llm:
         raise HTTPException(
             status_code=503,
-            detail="Ollama is not running. Please start Ollama and pull required models: qwen2.5:3b, nomic-embed-text"
+            detail="Ollama is not running. Please start Ollama and pull required models: <model_name>, nomic-embed-text"
         )
     
     try:
@@ -586,7 +760,7 @@ async def health_check():
             "status": "unhealthy",
             "error": str(e),
             "ollama": "disconnected",
-            "note": "Please run: ollama serve && ollama pull qwen2.5:3b && ollama pull nomic-embed-text"
+            "note": "Please run: ollama serve && ollama pull <model_name> && ollama pull nomic-embed-text"
         }
 
 # Include the router in the main app

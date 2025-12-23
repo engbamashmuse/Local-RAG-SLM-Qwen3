@@ -15,6 +15,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Progress } from "@/components/ui/progress";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Upload, FileText, MessageSquare, Trash2, Send, Database, Loader2, FolderOpen, AlertCircle, CheckCircle2 } from "lucide-react";
+import SystemConfig from "@/components/SystemConfig";
+import PromptSelector from "@/components/PromptSelector";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -29,7 +31,7 @@ const Home = () => {
   const [uploadProgress, setUploadProgress] = useState(null);
   const fileInputRef = useRef(null);
   const folderInputRef = useRef(null);
-  
+
   // Chat state
   const [messages, setMessages] = useState([]);
   const [query, setQuery] = useState("");
@@ -93,7 +95,7 @@ const Home = () => {
         const fileExt = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
         return !allowedTypes.includes(fileExt);
       });
-      
+
       if (invalidFiles.length > 0) {
         toast.error("Only PDF, DOCX, TXT, and ZIP files are supported");
         return;
@@ -115,7 +117,7 @@ const Home = () => {
     try {
       setUploading(true);
       setUploadProgress({ current: 0, total: selectedFiles.length });
-      
+
       const formData = new FormData();
       selectedFiles.forEach(file => {
         formData.append("files", file);
@@ -130,7 +132,7 @@ const Home = () => {
 
       const result = response.data;
       setUploadProgress(null);
-      
+
       // Show detailed results
       if (result.successful > 0) {
         toast.success(`Successfully uploaded ${result.successful} file(s)`);
@@ -138,19 +140,19 @@ const Home = () => {
       if (result.failed > 0) {
         toast.error(`Failed to upload ${result.failed} file(s)`);
       }
-      
+
       // Show details for each file
       result.details.forEach(detail => {
         if (detail.status === "failed") {
           toast.error(`${detail.filename}: ${detail.reason}`);
         }
       });
-      
+
       setSelectedFiles([]);
       setCollection("default");
       if (fileInputRef.current) fileInputRef.current.value = "";
       if (folderInputRef.current) folderInputRef.current.value = "";
-      
+
       fetchDocuments();
       fetchCollections();
     } catch (error) {
@@ -217,33 +219,16 @@ const Home = () => {
         {/* Header */}
         <div className="mb-8 text-center">
           <h1 className="text-4xl sm:text-5xl font-bold mb-3 bg-gradient-to-r from-slate-800 via-blue-700 to-teal-700 bg-clip-text text-transparent" style={{ fontFamily: 'Space Grotesk, sans-serif' }}>
-            Local RAG-SLM
+            Local LLM RAG
           </h1>
           <p className="text-base text-slate-600" style={{ fontFamily: 'Inter, sans-serif' }}>
-            Document Intelligence with Qwen 3 8B • Fully Local & Private
+            Document Intelligence • Fully Local & Private
           </p>
         </div>
 
         {/* Health Status Alert */}
-        {healthStatus && healthStatus.ollama === "disconnected" && (
-          <Alert className="mb-6 border-amber-500 bg-amber-50" data-testid="health-alert">
-            <AlertCircle className="h-4 w-4 text-amber-600" />
-            <AlertTitle className="text-amber-800">Ollama Not Running</AlertTitle>
-            <AlertDescription className="text-amber-700">
-              Please start Ollama with: <code className="bg-amber-100 px-2 py-1 rounded text-sm">ollama serve</code> and pull models: <code className="bg-amber-100 px-2 py-1 rounded text-sm">ollama pull qwen2.5:3b</code> and <code className="bg-amber-100 px-2 py-1 rounded text-sm">ollama pull nomic-embed-text</code>
-            </AlertDescription>
-          </Alert>
-        )}
-
-        {healthStatus && healthStatus.ollama === "connected" && (
-          <Alert className="mb-6 border-green-500 bg-green-50" data-testid="health-success">
-            <CheckCircle2 className="h-4 w-4 text-green-600" />
-            <AlertTitle className="text-green-800">System Ready</AlertTitle>
-            <AlertDescription className="text-green-700">
-              Ollama is connected and ready. You can upload documents and start chatting!
-            </AlertDescription>
-          </Alert>
-        )}
+        {/* System Configuration Panel */}
+        <SystemConfig apiUrl={API} />
 
         <Tabs defaultValue="chat" className="w-full">
           <TabsList className="grid w-full grid-cols-2 max-w-md mx-auto mb-6">
@@ -297,11 +282,10 @@ const Home = () => {
                           data-testid={`message-${message.role}-${idx}`}
                         >
                           <div
-                            className={`max-w-[80%] rounded-lg px-4 py-3 ${
-                              message.role === "user"
-                                ? "bg-blue-600 text-white"
-                                : "bg-slate-100 text-slate-900"
-                            }`}
+                            className={`max-w-[80%] rounded-lg px-4 py-3 ${message.role === "user"
+                              ? "bg-blue-600 text-white"
+                              : "bg-slate-100 text-slate-900"
+                              }`}
                           >
                             <p className="text-sm whitespace-pre-wrap">{message.content}</p>
                             {message.sources && message.sources.length > 0 && (
@@ -339,6 +323,10 @@ const Home = () => {
                     onKeyPress={(e) => e.key === "Enter" && !e.shiftKey && handleSendMessage()}
                     disabled={chatLoading || documents.length === 0 || healthStatus?.ollama === "disconnected"}
                     data-testid="chat-input"
+                  />
+                  <PromptSelector
+                    apiUrl={API}
+                    onSelectPrompt={(content) => setQuery(prev => prev + content)}
                   />
                   <Button
                     onClick={handleSendMessage}
@@ -389,7 +377,7 @@ const Home = () => {
                       data-testid="file-upload-input"
                     />
                   </div>
-                  
+
                   <div>
                     <Label htmlFor="folder-upload">Select Folder (as ZIP)</Label>
                     <div className="flex gap-2">

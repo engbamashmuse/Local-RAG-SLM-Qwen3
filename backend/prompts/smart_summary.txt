@@ -1,0 +1,3 @@
+Please provide a smart summary of the following context. 
+Focus on key decisions, assigned actions, and any risks mentioned.
+Structure the output with clear headings.

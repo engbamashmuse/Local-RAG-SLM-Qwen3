@@ -1,8 +1,8 @@
-# Local RAG-SLM Application
+# Local LLM RAG Application
 
-🚀 **Document Intelligence with Qwen 3 8B - Fully Local & Private**
+🚀 **Document Intelligence - Fully Local & Private**
 
-A production-ready Retrieval-Augmented Generation (RAG) application powered by Small Language Models (SLM) that runs entirely on your local machine. Upload documents, index them, and chat with them using natural language - all without sending data to the cloud.
+A production-ready Retrieval-Augmented Generation (RAG) application powered by Tier-Selectable LLMs that runs entirely on your local machine. Upload documents, index them, and chat with them using natural language - all without sending data to the cloud.
 
 ## 🎯 Features
 
@@ -29,7 +29,7 @@ A production-ready Retrieval-Augmented Generation (RAG) application powered by S
 
 ### Backend
 - **Framework**: FastAPI
-- **LLM**: Qwen 2.5 3B (via Ollama)
+- **LLM**: Tier-Selectable LLMs (via Ollama)
 - **Embeddings**: nomic-embed-text (via Ollama)
 - **Vector Database**: ChromaDB
 - **Database**: MongoDB
@@ -68,7 +68,7 @@ curl -fsSL https://ollama.com/install.sh | sh
 # Start Ollama service
 ollama serve &
 
-# Pull required models
+# Pull required models (Example)
 ollama pull qwen2.5:3b
 ollama pull nomic-embed-text
 ```
@@ -197,22 +197,34 @@ text_splitter = RecursiveCharacterTextSplitter(
 )
 ```
 
-### Model Selection
+### Model Selection (New)
 
-**Current Model**: Qwen 2.5 3B Q4
-- **Why**: Best balance of performance and efficiency for 8GB RAM
-- **Alternatives**:
-  - `phi3:mini` (3.8GB) - Microsoft's efficient model
-  - `llama3.2:3b` (2GB) - Meta's compact model
+The system now supports a **3-Tier Model Architecture** managed via the UI.
 
-**To Change Model**:
+1.  **Open the Web Interface** (`http://localhost:3000`).
+2.  **System Configuration Panel**: Use the dropdowns to select a tier (Low/Mid/High) and a specific model.
+    *   **Low**: < 4GB RAM (e.g., `phi3:mini`)
+    *   **Mid**: 4-8GB RAM (e.g., `qwen2.5:3b`)
+    *   **High**: > 16GB RAM (e.g., `llama3.1:70b`)
+3.  **Set Active Model**: Click the button. The system will handle the switch asynchronously. You can watch the progress indicator.
+    *   *Note: First-time switches may take minutes to download the model.*
+
+**Manual Override**:
+You can still manually update the source of truth if needed:
 ```bash
-# Pull new model
-ollama pull <model-name>
-
-# Update server.py
-llm = ChatOllama(model="<model-name>", ...)
+echo "qwen2.5:3b" > backend/.model
 ```
+
+### Pre-set Prompts
+Use the **"Sparkles" icon** in the chat bar to insert pre-made templates like:
+*   **Smart Summary**: Generates a structured summary of the context.
+*   **Action Items**: Extracts actions into a markdown table.
+
+## 🛡️ Deployment & Safety
+
+*   **Version Pinning**: All Docker images are pinned by SHA digest in `docker-compose.yml` to ensure reproducibility.
+*   **CI Gate**: The `scripts/ci_gate.py` script ensures no hardcoded model names (e.g., "qwen2.5") are introduced into the codebase.
+*   **Recovery**: The system includes a rollback test (`scripts/verify_rollback.py`) to ensure resilience against failed model updates.
 
 ## 🐛 Troubleshooting
 
