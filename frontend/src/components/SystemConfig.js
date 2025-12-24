@@ -208,7 +208,7 @@ const SystemConfig = ({ apiUrl }) => {
 
                 {/* Info & RAM Visualization */}
                 {activeModelObj && (
-                    <div className="bg-slate-50 rounded-lg p-3 border border-slate-100">
+                    <div className="bg-slate-50 rounded-lg p-3 border border-slate-100" title="Estimated RAM usage for this model">
                         <div className="flex items-center justify-between mb-2">
                             <span className="text-xs font-semibold uppercase text-slate-500">Estimated RAM Impact</span>
                             <span className={`text-xs font-bold px-2 py-0.5 rounded text-white ${getRamColor(activeModelObj.ram_gb)}`}>

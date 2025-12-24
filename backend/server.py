@@ -86,7 +86,11 @@ if embeddings:
 jobs = {}
 
 # Telemetry
+# Telemetry
 MODEL_SWITCH_DURATION = Summary('rag_model_switch_duration_seconds', 'Time spent switching models')
+
+# Start Prometheus metrics server
+start_http_server(8002)
 
 
 # Create the main app without a prefix

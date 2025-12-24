@@ -6,6 +6,7 @@ services:
       context: ./backend
     ports:
       - "8000:8000"
+      - "8002:8002"
     environment:
       - MONGO_URL=mongodb://mongo:27017
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
